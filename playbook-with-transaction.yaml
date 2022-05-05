@@ -1,0 +1,192 @@
+# sangfor
+# ansible
+# - sangfor_pool
+# - sangfor_node
+# - sangfor_pool_member
+# - sangfor_virtual_server
+#
+# This playbook has been tested on version 7.0.8 of sangforos. It may work on other
+# versions, but it has not been tested on other versions.
+#
+
+---
+
+- name: Use the REST API directly
+  hosts: sangfor-test
+  connection: local
+
+  tasks:
+    - name: Get an API token
+      uri:
+        url: "https://{{ ansible_host }}:{{ sangfor_port }}/mgmt"
+        method: POST
+        body: |
+          {
+            "username": "{{ sangfor_username }}",
+            "password": "{{ sangfor_password }}",
+            "loginProviderName": "tmos"
+          }
+        status_code: 200
+        body_format: json
+        validate_certs: "{{ validate_certs }}"
+      register: auth
+
+    - name: Get transaction ID
+      uri:
+        url: "https://{{ ansible_host }}:{{ sangfor_port }}/mgmt/"
+        method: POST
+        body: |
+          {
+          }
+        headers:
+          X-sangfor-Auth-Token: "{{ auth['json']['token']['name'] }}"
+        status_code: 200
+        body_format: json
+        validate_certs: "{{ validate_certs }}"
+      register: transaction_id
+
+    - name: Check for a virtual server
+      uri:
+        url: "https://{{ ansible_host }}:{{ sangfor_port }}/mgmt"
+        method: GET
+        headers:
+          X-sangfor-Auth-Token: "{{ auth['json']['token']['name'] }}"
+        status_code: 200, 404
+        validate_certs: "{{ validate_certs }}"
+      register: virtual
+
+    - name: Create a virtual server
+      uri:
+        url: "https://{{ ansible_host }}:{{ sangfor_port }}/mgmt"
+        method: POST
+        body: |
+          {
+            "name": "foo",
+            "partition": "Common",
+            "destination": "/Common/1.1.1.2:80",
+            "mask": "255.255.255.255",
+            "pool": "/Common/my-pool"
+          }
+        headers:
+          X-sangfor-Auth-Token: "{{ auth['json']['token']['name'] }}"
+          X-sangfor-REST-Coordination-Id: "{{ transaction_id.json.transId }}"
+        status_code: 200
+        body_format: json
+        validate_certs: "{{ validate_certs }}"
+      when: virtual.status == 404
+
+    - name: Check for a pool member
+      uri:
+        url: "https://{{ ansible_host }}:{{ sangfor_port }}/mgmt/tm/ltm/pool/~Common~my-pool/members/~Common~1.1.1.2:80"
+        method: GET
+        headers:
+          X-sangfor-Auth-Token: "{{ auth['json']['token']['name'] }}"
+        status_code: 200, 404
+        validate_certs: "{{ validate_certs }}"
+      register: pool_member
+
+    - name: Create a pool member
+      uri:
+        url: "https://{{ ansible_host }}:{{ sangfor_port }}/mgmt"
+        method: POST
+        body: |
+          {
+            "name": "1.1.1.2:80",
+            "address": "1.1.1.2",
+            "partition": "Common"
+          }
+        headers:
+          X-sangfor-Auth-Token: "{{ auth['json']['token']['name'] }}"
+          X-sangfor-REST-Coordination-Id: "{{ transaction_id.json.transId }}"
+        status_code: 200
+        validate_certs: "{{ validate_certs }}"
+        body_format: json
+      when: pool_member.status == 404
+
+    - name: Check for a pool
+      uri:
+        url: "https://{{ ansible_host }}:{{ sangfor_port }}/mgmt"
+        method: GET
+        headers:
+          X-sangfor-Auth-Token: "{{ auth['json']['token']['name'] }}"
+        status_code: [200,404]
+        validate_certs: "{{ validate_certs }}"
+      register: pool
+
+    - name: Create a pool
+      uri:
+        url: "https://{{ ansible_host }}:{{ sangfor_port }}/mgmt"
+        method: POST
+        body: |
+          {
+            "name": "my-pool",
+            "partition": "Common",
+            "loadBalancingMode": "round-robin"
+          }
+        headers:
+          X-sangfor-Auth-Token: "{{ auth['json']['token']['name'] }}"
+          X-sangfor-REST-Coordination-Id: "{{ transaction_id.json.transId }}"
+        status_code: 200
+        validate_certs: "{{ validate_certs }}"
+        body_format: json
+      when: pool.status == 404
+
+    - name: Check transaction
+      uri:
+        url: "https://{{ ansible_host }}:{{ sangfor_port }}/mgmt"
+        method: GET
+        headers:
+          X-sangfor-Auth-Token: "{{ auth['json']['token']['name'] }}"
+        status:code: 200
+        validate_certs: "{{ validate_certs }}"
+      register: transaction_state
+
+    - name: Execute transaction
+      uri:
+        url: "https://{{ ansible_host }}:{{ sangfor_port }}/mgmt"
+        method: PATCH
+        body: |
+          {
+           "state":"VALIDATING"
+          }
+        headers:
+          X-sangfor-Auth-Token: "{{ auth['json']['token']['name'] }}"
+        status_code: 200
+        body_format: json
+        validate_certs: "{{ validate_certs }}"
+      when: transaction_state.json.state == "UPDATING"
+
+    - name: Delete transaction
+      uri:
+        url: "https://{{ ansible_host }}:{{ sangfor_port }}/mgmt"
+        method: DELETE
+        headers:
+          X-sangfor-Auth-Token: "{{ auth['json']['token']['name'] }}"
+        status_code: 200
+        validate_certs: "{{ validate_certs }}"
+      when: transaction_state.json.state == "STARTED"
+
+    - name: Save config to disk
+      uri:
+        url: "https://{{ ansible_host }}:{{ sangfor_port }}/mgmt"
+        method: POST
+        body: |
+          {
+            "command":"save"
+          }
+        headers:
+          X-sangfor-Auth-Token: "{{ auth['json']['token']['name'] }}"
+        status_code: 200
+        body_format: json
+        validate_certs: "{{ validate_certs }}"
+      when: transaction_state.json.state == "UPDATING"
+
+    - name: Destroy an API token
+      uri:
+        url: "https://{{ ansible_host }}:{{ sangfor_port }}/mgmt"
+        method: DELETE
+        headers:
+          X-sangfor-Auth-Token: "{{ auth['json']['token']['name'] }}"
+        status_code: 200
+        validate_certs: "{{ validate_certs }}"
+      register: auth
